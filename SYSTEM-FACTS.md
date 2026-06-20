@@ -46,7 +46,9 @@ the running hardware with `blkid` / `lsblk` / `lspci` / `mdadm --detail`.
 | sdc6 | `b3a35389-68eb-4158-8bf9-4c296fcd45ab` | **ext4→reformat f2fs** | voidroot | abd39e2a-… | Void `/` (the one wipe) |
 | sdc7 | `494196d1-8b53-4076-b26b-ef3f6d0f309c` | btrfs | NIX Store | 17f14d41-… | NixOS `/` (compress=zstd) |
 
-> ⚠️ After `mkfs.f2fs` on sdc6, its UUID changes — re-`blkid` before writing void's fstab.
+> ⚠️ All seven `sdc` partitions are reformatted, so **every `sdc` UUID above changes** — re-`blkid`
+> before writing each OS's fstab. Media: `sdc` is a USB-bridged SSD that reports `rotational=1`
+> (btrfs needs the `ssd` flag set explicitly); TRIM passes the bridge (`DISC-MAX 4G`) so `discard=async` is safe.
 
 ## Other drives (context — DO NOT TOUCH during the build)
 - `sda` 23.6T SATA ST26000DM000 — sda1 btrfs `BPOOL` `0eb3fe37-…` (arch `@var`), sda2 xfs `126dc0a6-…` (arch `/mnt/seagate/newpool`).

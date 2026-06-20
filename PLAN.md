@@ -8,7 +8,7 @@ sharing one EFI, one `/home` (RAID0), and one identity. **Debian is the master**
 only GRUB in NVRAM and chainloads the other two ("deb feeds them grub, they kiss debian's boots").
 This box is a **CUDA dev workstation** with **2× RTX 5060 Ti (Blackwell)** that need
 **peer-to-peer** via the `ec-jt/open-gpu-kernel-modules` fork, plus an Intel Raptor Lake iGPU
-driven by the experimental **Xe** driver.
+(i915 on Debian/NixOS, experimental **Xe** on Void). NixOS tracks `nixos-unstable` (bleeding edge).
 
 Everything here is a runbook to execute *after* plan approval. Nothing destructive has run yet.
 
@@ -34,25 +34,33 @@ Everything here is a runbook to execute *after* plan approval. Nothing destructi
 ### NVIDIA / CUDA pins (confirmed)
 - `ECJT_REPO=https://github.com/ec-jt/open-gpu-kernel-modules` → branch/tag matching **NV 610.43.02**.
 - `NV_VERSION = 610.43.02` — userspace driver; **must equal the ec-jt fork tag**.
-- `CUDA`: **Void pinned 13.3** (confirmed). **NixOS: 13.x preferred, 12.9.1 acceptable** — just take
-  whatever `cudaPackages` the channel ships (no overlay needed). `cuDNN` + `NCCL` to match.
+- `CUDA`: **Void pinned 13.3** (confirmed). **NixOS: 13.x** from the rolling channel. `cuDNN`+`NCCL` to match.
+- **NixOS channel: `nixos-unstable`** (rolling / bleeding edge — explicitly NOT stable; `stateVersion = "26.05"` is just the schema anchor).
+- **Tailnet:** `hedgehog-bortle.ts.net` → this box = `apestonks-69.hedgehog-bortle.ts.net`.
 
 ---
 
-## Partition map (`sdc`) — only `sdc6` gets reformatted
+## Partition map (`sdc`) — all of `sdc1`–`sdc7` get a fresh filesystem
 
-| Part | Current | Role | Action |
+Every target partition is made fresh (clean fs + correct label/flags). The `mkfs` for each runs in the
+phase that owns that partition.
+
+| Part | Size | Role | mkfs |
 |---|---|---|---|
-| sdc1 | vfat `EFI` 512M | **shared ESP** | keep; Debian mounts at `/boot/efi` |
-| sdc2 | ext4 `debboot` 768M | Debian `/boot` | keep (mkfs fresh ok) |
-| sdc3 | ext4 `voidboot` 1G | Void `/boot` | keep |
-| sdc4 | ext4 `nixboot` 1G | NixOS `/boot` | keep |
-| sdc5 | f2fs `debroot` 16G | Debian `/` | keep fs, debootstrap into it |
-| sdc6 | **ext4** `voidroot` 107G | Void `/` | **`mkfs.f2fs -f` → wipes it** |
-| sdc7 | btrfs `NIX Store` 112G | NixOS `/` | keep, mount `compress=zstd` |
+| sdc1 | 512M | shared ESP → Debian `/boot/efi` | `mkfs.vfat -F32 -n EFI /dev/sdc1` |
+| sdc2 | 768M | Debian `/boot` | `mkfs.ext4 -F -L debboot /dev/sdc2` |
+| sdc3 | 1G | Void `/boot` | `mkfs.ext4 -F -L voidboot /dev/sdc3` |
+| sdc4 | 1G | NixOS `/boot` | `mkfs.ext4 -F -L nixboot /dev/sdc4` |
+| sdc5 | 16G | Debian `/` | `mkfs.f2fs -f -l debroot /dev/sdc5` |
+| sdc6 | 107G | Void `/` | `mkfs.f2fs -f -l voidroot /dev/sdc6` |
+| sdc7 | 112G | NixOS `/` (mount `compress=zstd,noatime,ssd,discard=async`) | `mkfs.btrfs -f -L 'NIX Store' /dev/sdc7` |
 
-> ⚠️ The **only** destructive disk op is `mkfs.f2fs` on `sdc6`. Everything else is additive.
-> `sda`, `sdb`, `nvme*`, `md127` are untouched except `/home`←md0 is *mounted*, never formatted.
+> Writes happen **only on `sdc`**. No other disk is written to.
+>
+> **Media note:** `sdc` is a **USB-bridged SSD** (Transcend ESD310C). It reports `rotational=1`, so
+> btrfs won't auto-enable SSD mode → the `ssd` mount flag is set **explicitly** on `sdc7`. TRIM *does*
+> pass the bridge (`DISC-MAX 4G`), so `discard=async` is safe. The f2fs/ext4 roots lean on periodic
+> `fstrim` rather than continuous discard.
 
 ---
 
@@ -69,21 +77,21 @@ export DEBOOTSTRAP_DIR=/tmp/dbs/usr/share/debootstrap
 # Nix (single-user, no systemd dance on a RAM live):
 sh <(curl -L https://nixos.org/nix/install) --no-daemon
 . ~/.nix-profile/etc/profile.d/nix.sh
-nix-channel --add https://nixos.org/channels/nixos-25.05 nixpkgs && nix-channel --update
+nix-channel --add https://nixos.org/channels/nixos-unstable nixpkgs && nix-channel --update  # rolling / bleeding edge
 nix-env -iA nixpkgs.nixos-install-tools
 ```
 
-**Do NOT restack/clamp the array from the live env.** No `mdadm --stop/--assemble/--create` here.
-The array is **preserved and never formatted** — it holds `/home`. The `md0` name is achieved *only*
-by the `mdadm.conf` written into each installed OS (§RAID). For bootstrap, mount the
-**already-assembled** array read-write as-is (whatever node the live kernel assigned, e.g.
-`/dev/md127`); the installed systems will present it as `/dev/md0` via their own `mdadm.conf`.
+The `md0` name is set **inside each installed OS** by its `mdadm.conf` (§RAID). In the live env the
+array is already assembled by the kernel — mount it where a chroot needs `/home`.
 
 ---
 
 ## Phase 1 — Debian (master) → `sdc5` + `sdc2` + shared ESP `sdc1`
 
 ```bash
+mkfs.vfat -F32 -n EFI   /dev/sdc1      # shared ESP
+mkfs.ext4 -F -L debboot /dev/sdc2      # Debian /boot
+mkfs.f2fs -f -l debroot /dev/sdc5      # Debian /
 mount /dev/disk/by-label/debroot /mnt/deb
 mkdir -p /mnt/deb/boot && mount /dev/disk/by-label/debboot /mnt/deb/boot
 mkdir -p /mnt/deb/boot/efi && mount /dev/disk/by-label/EFI /mnt/deb/boot/efi
@@ -103,7 +111,8 @@ Inside chroot:
 ## Phase 2 — Void → `sdc6` (reformat) + `sdc3`
 
 ```bash
-mkfs.f2fs -f -l voidroot /dev/sdc6            # <-- the one wipe
+mkfs.ext4 -F -L voidboot /dev/sdc3            # Void /boot
+mkfs.f2fs -f -l voidroot /dev/sdc6            # Void /
 mount /dev/disk/by-label/voidroot /mnt/void
 tar xpf ~/Downloads/void-x86_64-ROOTFS-20250202.tar.xz -C /mnt/void
 mkdir -p /mnt/void/boot && mount /dev/disk/by-label/voidboot /mnt/void/boot
@@ -124,7 +133,9 @@ Inside (Void uses **xbps** + **runit** + **dracut**):
 ## Phase 3 — NixOS → `sdc7` (btrfs) + `sdc4`
 
 ```bash
-mount -o compress=zstd,subvol=/ /dev/disk/by-label/'NIX Store' /mnt/nix   # or create @ subvol
+mkfs.ext4 -F -L nixboot      /dev/sdc4               # NixOS /boot
+mkfs.btrfs -f -L 'NIX Store' /dev/sdc7               # NixOS /
+mount -o compress=zstd,noatime,ssd,discard=async,space_cache=v2 /dev/disk/by-label/'NIX Store' /mnt/nix
 mkdir -p /mnt/nix/boot && mount /dev/disk/by-label/nixboot /mnt/nix/boot
 mkdir -p /mnt/nix/mnt/hot && mount /dev/md0 /mnt/nix/mnt/hot   # array at /mnt/hot; bind /home/admin via config
 nixos-generate-config --root /mnt/nix
@@ -134,6 +145,8 @@ nixos-install --root /mnt/nix
 `configuration.nix` essentials:
 ```nix
 networking.hostName = "apestonks-69";
+system.stateVersion = "26.05";   # schema anchor only — packages track nixos-unstable, not this
+boot.kernelPackages = pkgs.linuxPackages_latest;   # newest kernel: Xe (RPL) + Blackwell
 time.timeZone = "UTC"; i18n.defaultLocale = "en_US.UTF-8";
 users.users.admin = { isNormalUser = true; uid = 1000;
   extraGroups = [ "wheel" "video" "render" "docker" ]; };
@@ -145,14 +158,14 @@ boot.loader.efi.canTouchEfiVariables = false;
 boot.loader.efi.efiSysMountPoint = "/boot";   # = sdc4, Debian's master grub `configfile`s this
 boot.plymouth.enable = false; boot.loader.timeout = 1;   # no graphical boot
 
-fileSystems."/".options = [ "compress=zstd" "noatime" ];     # btrfs compression, your noatime
+fileSystems."/".options = [ "compress=zstd" "noatime" "ssd" "discard=async" "space_cache=v2" ];  # USB SSD reports rotational=1 → ssd EXPLICIT; TRIM passes the bridge (DISC-MAX 4G)
 # Array at /mnt/hot, per-user bind, nofail (matches arch fstab)
 fileSystems."/mnt/hot" = { device = "/dev/disk/by-uuid/6df6919b-40b6-44bb-8c19-791c6556ae15";
   fsType = "xfs"; options = [ "rw" "strictatime" "discard" "nofail" ]; };
 fileSystems."/home/admin" = { device = "/mnt/hot/home/admin"; fsType = "none";
   options = [ "bind" "nofail" ]; };
 boot.swraid.enable = true;
-boot.swraid.mdadmConf = "ARRAY /dev/md0 metadata=1.2 name=apestonks-69:0 UUID=<mdadm-uuid>";
+boot.swraid.mdadmConf = "ARRAY /dev/md0 metadata=1.2 UUID=85172657:de2fb0b4:a9f5a913:98c95b5c";
 
 # iGPU on default i915 (NO xe params on NixOS); just nvidia modeset for wayland
 boot.kernelParams = [ "nvidia_drm.modeset=1" ];
@@ -191,7 +204,6 @@ swapDevices = [ { device = "/mnt/hot/swapfile"; } ];  # shared file on the array
   /mnt/hot/home/admin                        /home/admin   none  bind,nofail                    0 0
   ```
   (Add more `/mnt/hot/home/<user>` binds later, same pattern — and deferred `/var` binds too.)
-  **Never** put md0/the xfs in an fstab `mkfs`.
 - **Fallback semantics (what you described):** `/home/admin` is a real local dir on each USB rootfs.
   Array up → `/mnt/hot/home/admin` binds over it. Array dead → bind skips (`nofail`) → you fall back
   to the **local `/home/admin`** on the rootfs; boot/login unaffected. So each rootfs must already
@@ -261,7 +273,8 @@ Debian renders on nouveau (iGPU via Xe) and never touches this section.
 
 ### §Tailscale — all three
 - Debian: tailscale apt repo → `tailscale`; Void: `xbps-install tailscale` + runit service;
-  NixOS: `services.tailscale.enable`. One `tailscale up` (machine shares hostname `apestonks-69`).
+  NixOS: `services.tailscale.enable`. `tailscale up --hostname apestonks-69` → joins tailnet
+  **`hedgehog-bortle.ts.net`** as `apestonks-69.hedgehog-bortle.ts.net`.
 
 ---
 
@@ -281,12 +294,12 @@ Debian renders on nouveau (iGPU via Xe) and never touches this section.
 8. **Real-workload proof (the actual goal):** `nvidia-smi topo -p2p r` = P2P OK both directions, then
    **vLLM tensor-parallel (TP=2)** serving Gemma 4 31B dense hits your ~75 T/s tg. If P2P silently
    fell back (ReBAR/Above-4G off, or ec-jt tag ≠ 610.43.02), TP throughput craters — that's the canary.
-8. **Swap:** `swapon --show` shows the 16G file on each.
-9. **WM:** Void/NixOS launch `niri` from TTY; Debian `startx` → ctwm.
-10. **Tailscale:** `tailscale status` up on each.
+9. **Swap:** `swapon --show` shows the 16G file on each.
+10. **WM:** Void/NixOS launch `niri` from TTY; Debian `startx` → ctwm.
+11. **Tailscale:** `tailscale status` up; box is `apestonks-69.hedgehog-bortle.ts.net`.
 
 ## Known rough edges (flagged, not blockers)
 - **ec-jt tag must == NV 610.43.02** — confirm before building; userspace driver version must match exactly.
-- **NixOS CUDA** is relaxed: 13.x preferred but **12.9.1 is a fine fallback** — use the channel's `cudaPackages` as-is, no unstable/overlay needed.
+- **NixOS CUDA**: on `nixos-unstable`, `cudaPackages` 13.x is current — 12.9.1 fallback shouldn't be needed.
 - **Void CUDA 13.3** via NVIDIA repo/runfile (not native xbps pkgs) — known-good for you, just not one-command.
 - **os-prober** is a backup; the explicit `configfile` entries are the primary chainload path.
