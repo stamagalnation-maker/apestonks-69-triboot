@@ -131,57 +131,88 @@ Inside (Void uses **xbps** + **runit** + **dracut**):
 - mdraid in initrd: `/etc/mdadm.conf` (see §RAID) + dracut `add_dracutmodules+=" mdraid "`, `xbps-reconfigure -fa`.
 - Guest grub.cfg (no NVRAM entry): `grub-mkconfig -o /boot/grub/grub.cfg` (kernels land in `/boot` on sdc3).
 
-## Phase 3 — NixOS → `sdc7` (btrfs) + `sdc4`
+## Phase 3 — NixOS (**flake-based**) → `sdc7` (btrfs) + `sdc4`
 
 ```bash
 mkfs.ext4 -F -L nixboot      /dev/sdc4               # NixOS /boot
 mkfs.btrfs -f -L 'NIX Store' /dev/sdc7               # NixOS /
 mount -o compress=zstd,noatime,ssd,discard=async,space_cache=v2 /dev/disk/by-label/'NIX Store' /mnt/nix
 mkdir -p /mnt/nix/boot && mount /dev/disk/by-label/nixboot /mnt/nix/boot
-mkdir -p /mnt/nix/mnt/hot && mount /dev/md0 /mnt/nix/mnt/hot   # array at /mnt/hot; bind /home/admin via config
-nixos-generate-config --root /mnt/nix
-# edit /mnt/nix/etc/nixos/configuration.nix  (see block below)
-nixos-install --root /mnt/nix
+mkdir -p /mnt/nix/mnt/hot && mount /dev/md0 /mnt/nix/mnt/hot
+nixos-generate-config --root /mnt/nix      # KEEP hardware-configuration.nix; replace configuration.nix
+# write flake.nix + configuration.nix (below) into /mnt/nix/etc/nixos/, then flake-install:
+nixos-install --root /mnt/nix --flake /mnt/nix/etc/nixos#apestonks-69 \
+  --option experimental-features 'nix-command flakes'
 ```
-`configuration.nix` essentials:
+
+**`flake.nix`** — idiomatic entry point; `nixos-unstable` pinned in `flake.lock` (reproducible):
 ```nix
-networking.hostName = "apestonks-69";
-system.stateVersion = "26.05";   # schema anchor only — packages track nixos-unstable, not this
-boot.kernelPackages = pkgs.linuxPackages_latest;   # newest kernel: Xe (RPL) + Blackwell
-time.timeZone = "America/New_York"; i18n.defaultLocale = "en_US.UTF-8"; console.keyMap = "us";
-users.users.admin = { isNormalUser = true; uid = 1000;
-  extraGroups = [ "wheel" "video" "render" "docker" ]; };
-
-# Guest bootloader: write grub.cfg to OWN /boot, no NVRAM, no touching shared ESP.
-boot.loader.grub = { enable = true; efiSupport = true; device = "nodev";
-  efiInstallAsRemovable = false; };
-boot.loader.efi.canTouchEfiVariables = false;
-boot.loader.efi.efiSysMountPoint = "/boot";   # = sdc4, Debian's master grub `configfile`s this
-boot.plymouth.enable = false; boot.loader.timeout = 1;   # no graphical boot
-
-fileSystems."/".options = [ "compress=zstd" "noatime" "ssd" "discard=async" "space_cache=v2" ];  # USB SSD reports rotational=1 → ssd EXPLICIT; TRIM passes the bridge (DISC-MAX 4G)
-# Array at /mnt/hot, per-user bind, nofail (matches arch fstab)
-fileSystems."/mnt/hot" = { device = "/dev/disk/by-uuid/6df6919b-40b6-44bb-8c19-791c6556ae15";
-  fsType = "xfs"; options = [ "rw" "strictatime" "discard" "nofail" ]; };
-fileSystems."/home/admin" = { device = "/mnt/hot/home/admin"; fsType = "none";
-  options = [ "bind" "nofail" ]; };
-boot.swraid.enable = true;
-boot.swraid.mdadmConf = "ARRAY /dev/md0 metadata=1.2 UUID=85172657:de2fb0b4:a9f5a913:98c95b5c";
-
-# iGPU on default i915 (NO xe params on NixOS); just nvidia modeset for wayland
-boot.kernelParams = [ "nvidia_drm.modeset=1" ];
-
-# NVIDIA: userspace + cuda stack, but kernel module from ec-jt fork (see §NVIDIA stack)
-hardware.nvidia.open = true;     # Blackwell is open-only; package overridden to ec-jt src
-programs.niri.enable = true;     # wayland WM
-services.tailscale.enable = true;
-virtualisation.docker.enable = true;
-hardware.nvidia-container-toolkit.enable = true;
-environment.systemPackages = with pkgs; [ git curl wget jq neovim nodejs_22 nodePackages.npm bun
-  cudaPackages.cudatoolkit cudaPackages.cudnn cudaPackages.nccl ];  # 13.x if channel has it, else 12.9.1 — both fine
-nixpkgs.config.allowUnfree = true;
-swapDevices = [ { device = "/mnt/hot/swapfile"; } ];  # shared file on the array, see §Swap
+{
+  description = "apestonks-69";
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    home-manager = { url = "github:nix-community/home-manager"; inputs.nixpkgs.follows = "nixpkgs"; };
+  };
+  outputs = { self, nixpkgs, home-manager, ... }: {
+    nixosConfigurations.apestonks-69 = nixpkgs.lib.nixosSystem {
+      system = "x86_64-linux";
+      modules = [ ./hardware-configuration.nix ./configuration.nix ];
+      # home-manager input is wired & ready, but NOT added to modules — see the caveat below.
+    };
+  };
+}
 ```
+
+**`configuration.nix`** (idiomatic — *options*, not bind-hacks):
+```nix
+{ pkgs, ... }: {
+  networking.hostName = "apestonks-69";
+  system.stateVersion = "26.05";            # schema anchor only; pkgs track nixos-unstable
+  boot.kernelPackages = pkgs.linuxPackages_latest;          # newest kernel: Xe (RPL) + Blackwell
+  time.timeZone = "America/New_York"; i18n.defaultLocale = "en_US.UTF-8"; console.keyMap = "us";
+  nixpkgs.config.allowUnfree = true;
+
+  users.users.admin = { isNormalUser = true; uid = 1000;
+    extraGroups = [ "wheel" "video" "render" "docker" "libvirtd" ]; };
+
+  # Guest under Debian's master GRUB: emit grub.cfg ONLY, install no bootloader binary
+  # (sdc4 is ext4, not an ESP; Debian's grub `configfile`s it — §Bootloader).
+  # >>> TEST-LIVE PART <<<  verify the generated /boot/grub/grub.cfg paths resolve from Debian's
+  # GRUB; if they don't, fall back to chainloading NixOS's own grubx64.efi (§Bootloader).
+  boot.loader.grub = { enable = true; device = "nodev"; efiSupport = false; };
+  boot.loader.timeout = 1; boot.plymouth.enable = false;   # no graphical boot
+
+  # btrfs root on the USB SSD — ssd EXPLICIT (bridge masks rotational=1); TRIM passes (DISC-MAX 4G)
+  fileSystems."/".options = [ "compress=zstd" "noatime" "ssd" "discard=async" "space_cache=v2" ];
+  fileSystems."/mnt/hot" = { device = "/dev/disk/by-uuid/6df6919b-40b6-44bb-8c19-791c6556ae15";
+    fsType = "xfs"; options = [ "rw" "strictatime" "discard" "nofail" ]; };
+  fileSystems."/home/admin" = { device = "/mnt/hot/home/admin"; fsType = "none"; options = [ "bind" "nofail" ]; };
+  boot.swraid.enable = true;
+  boot.swraid.mdadmConf = "ARRAY /dev/md0 metadata=1.2 UUID=85172657:de2fb0b4:a9f5a913:98c95b5c";
+  swapDevices = [ { device = "/mnt/hot/swapfile"; } ];     # existing shared file, §Swap
+
+  boot.kernelParams = [ "nvidia_drm.modeset=1" ];          # iGPU stays default i915
+  hardware.nvidia.open = true;   # Blackwell = open-only; hardware.nvidia.package → ec-jt src (your fill-in)
+  hardware.nvidia-container-toolkit.enable = true;
+
+  programs.niri.enable = true;
+  services.tailscale.enable = true;
+  virtualisation.docker.enable = true;     # storage data-root → §/var/lib (on the array)
+  services.ollama.enable = true;           # models dir → §/var/lib (on the array)
+  virtualisation.libvirtd.enable = true;
+
+  environment.systemPackages = with pkgs; [ git curl wget jq neovim nodejs_22 nodePackages.npm bun
+    cudaPackages.cudatoolkit cudaPackages.cudnn cudaPackages.nccl ];
+}
+```
+
+> **home-manager caveat — why I did NOT just bolt it on (and you specifically asked me to surface this kind of thing):**
+> home-manager writes your dotfiles as **symlinks into `/nix/store`**. But `/home/admin` is **shared**
+> with Debian and Void, which have **no `/nix/store`** — so every home-manager-managed dotfile becomes a
+> **dangling symlink the moment you boot Debian or Void**. So on *this* box: **flakes = yes; home-manager
+> for shared dotfiles = no.** Keep portable config (nvim/shell/git) as plain real files in `/home/admin`
+> so all three OSes share them; reserve home-manager for NixOS-*only* bits if you use it at all. Your call —
+> flagging it instead of shipping you a subtly-broken shared home.
 
 ---
 
