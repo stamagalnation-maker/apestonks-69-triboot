@@ -69,11 +69,14 @@ phase that owns that partition.
 
 ```bash
 sudo pacman -S --needed arch-install-scripts dosfstools f2fs-tools btrfs-progs xfsprogs mdadm
-# debootstrap is not in arch repos on the live ISO — fetch Debian's copy and run it directly:
-cd /tmp && curl -fLO http://ftp.debian.org/debian/pool/main/d/debootstrap/debootstrap_<ver>_all.deb
-ar x debootstrap_*.deb && tar -xf data.tar.* -C /tmp/dbs
+# debootstrap is not in arch repos on the live ISO — fetch Debian's copy AND the keyring (Arch has
+# no Debian keyring → debootstrap GPG-verify FAILS without it; verified):
+cd /tmp && mkdir -p /tmp/dbs
+curl -fLO http://ftp.debian.org/debian/pool/main/d/debootstrap/debootstrap_<ver>_all.deb
+curl -fLO http://ftp.debian.org/debian/pool/main/d/debian-archive-keyring/debian-archive-keyring_<ver>_all.deb
+for d in debootstrap_*.deb debian-archive-keyring_*.deb; do ar x "$d" && tar -xf data.tar.* -C /tmp/dbs; done
 export DEBOOTSTRAP_DIR=/tmp/dbs/usr/share/debootstrap
-# (debootstrap binary: /tmp/dbs/usr/sbin/debootstrap)
+# binary: /tmp/dbs/usr/sbin/debootstrap ; keyring: /tmp/dbs/usr/share/keyrings/debian-archive-keyring.gpg
 
 # Nix (single-user, no systemd dance on a RAM live):
 sh <(curl -L https://nixos.org/nix/install) --no-daemon
@@ -96,7 +99,9 @@ mkfs.f2fs -f -l debroot /dev/sdc5      # Debian /
 mount /dev/disk/by-label/debroot /mnt/deb
 mkdir -p /mnt/deb/boot && mount /dev/disk/by-label/debboot /mnt/deb/boot
 mkdir -p /mnt/deb/boot/efi && mount /dev/disk/by-label/EFI /mnt/deb/boot/efi
-/tmp/dbs/usr/sbin/debootstrap --arch=amd64 trixie /mnt/deb http://deb.debian.org/debian
+/tmp/dbs/usr/sbin/debootstrap --arch=amd64 \
+  --keyring=/tmp/dbs/usr/share/keyrings/debian-archive-keyring.gpg --include=debian-archive-keyring \
+  trixie /mnt/deb http://deb.debian.org/debian          # (or --no-check-gpg to skip verification)
 for d in dev dev/pts proc sys run; do mount --rbind /$d /mnt/deb/$d; done
 cp /etc/resolv.conf /mnt/deb/etc/ ; chroot /mnt/deb /bin/bash
 ```
@@ -121,7 +126,8 @@ for d in dev proc sys run; do mount --rbind /$d /mnt/void/$d; done
 cp /etc/resolv.conf /mnt/void/etc/ ; chroot /mnt/void /bin/bash
 ```
 Inside (Void uses **xbps** + **runit** + **dracut**):
-- `xbps-install -Suy` then base: `base-system grub-x86_64-efi mdadm dracut f2fs-tools dbus`.
+- **Old rootfs → update xbps ITSELF first** (own transaction, per Void docs), then the rest, then base:
+  `xbps-install -Suy xbps` → `xbps-install -uy` → `xbps-install -y base-system grub-x86_64-efi mdadm dracut f2fs-tools dbus`.
 - glibc locale: edit `/etc/default/libc-locales`, `xbps-reconfigure -f glibc-locales`.
 - Dev/common: `git curl wget jq neovim nodejs npm dkms`.
 - **niri** (wayland): `xbps-install niri` — it's in the Void repos (same as your laptops), plus `seatd`/`elogind`, `xdg-desktop-portal-wlr`.
@@ -359,8 +365,15 @@ Debian renders on nouveau (iGPU via Xe) and never touches this section.
 10. **WM:** Void/NixOS launch `niri` from TTY; Debian `startx` → ctwm.
 11. **Tailscale:** `tailscale status` up; box is `apestonks-69.hedgehog-bortle.ts.net`.
 
-## Known rough edges (flagged, not blockers)
+## Known rough edges & gotchas
+- **⚠️ REAL BLOCKER: this live kernel has NO `vfat`** (verified — no module, not built-in) → you **can't
+  mount the ESP `sdc1`** here, so `grub-install` to `/boot/efi` won't run from this live env as-is. Fixes:
+  (a) populate the ESP with **`mtools`** (installed here; `mmd`/`mcopy` write FAT with no kernel support), or
+  (b) do the bootloader step from a **vfat-capable live USB**. Resolve before Phase 1.
+- **debootstrap-from-Arch keyring** (verified): handled — Phase 0 fetches `debian-archive-keyring`, Phase 1 passes `--keyring`.
+- **Void rootfs ~16 mo old** (verified): handled — `xbps-install -Su xbps` first, then `-u`, then `base-system`.
+- **NixOS bootloader = `>>> TEST-LIVE <<<`**: `configfile` primary, chainloader fallback, os-prober backup (Phase 3 / §Bootloader).
+- **nvidia + niri (wayland)** on Void/NixOS has real edges (needs `nvidia_drm.modeset=1`; cursor/suspend quirks) — not a clean one-liner.
+- **home-manager NOT for shared `/home`** dotfiles (dangling `/nix/store` symlinks on Debian/Void) — see Phase 3 caveat.
 - **ec-jt tag must == NV 610.43.02** — confirm before building; userspace driver version must match exactly.
-- **NixOS CUDA**: on `nixos-unstable`, `cudaPackages` 13.x is current — 12.9.1 fallback shouldn't be needed.
-- **Void CUDA 13.3** via NVIDIA repo/runfile (not native xbps pkgs) — known-good for you, just not one-command.
-- **os-prober** is a backup; the explicit `configfile` entries are the primary chainload path.
+- **NixOS CUDA**: `nixos-unstable` carries 13.x. **Void CUDA 13.3** via NVIDIA repo/runfile (known-good for you, not one-command).
