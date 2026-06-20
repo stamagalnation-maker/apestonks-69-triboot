@@ -366,10 +366,11 @@ Debian renders on nouveau (iGPU via Xe) and never touches this section.
 11. **Tailscale:** `tailscale status` up; box is `apestonks-69.hedgehog-bortle.ts.net`.
 
 ## Known rough edges & gotchas
-- **⚠️ REAL BLOCKER: this live kernel has NO `vfat`** (verified — no module, not built-in) → you **can't
-  mount the ESP `sdc1`** here, so `grub-install` to `/boot/efi` won't run from this live env as-is. Fixes:
-  (a) populate the ESP with **`mtools`** (installed here; `mmd`/`mcopy` write FAT with no kernel support), or
-  (b) do the bootloader step from a **vfat-capable live USB**. Resolve before Phase 1.
+- **⚠️ vfat unavailable on THIS specific live stick (env quirk, not a plan flaw):** it was `-Syyu`'d,
+  bumping `linux-cachyos` 6.19.10→7.0.11, which **deleted the running kernel's `/usr/lib/modules/6.19.10`**
+  — so `vfat` (and every not-preloaded module) is gone, and the ESP `sdc1` can't be mounted here. **A fresh
+  / un-upgraded live USB won't have this.** Install from a different env (the plan assumes that). If you ever
+  *did* need FAT from a crippled live: `mtools` (`mmd`/`mcopy`) writes FAT with no kernel support.
 - **debootstrap-from-Arch keyring** (verified): handled — Phase 0 fetches `debian-archive-keyring`, Phase 1 passes `--keyring`.
 - **Void rootfs ~16 mo old** (verified): handled — `xbps-install -Su xbps` first, then `-u`, then `base-system`.
 - **NixOS bootloader = `>>> TEST-LIVE <<<`**: `configfile` primary, chainloader fallback, os-prober backup (Phase 3 / §Bootloader).
