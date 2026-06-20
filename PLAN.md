@@ -27,6 +27,7 @@ Everything here is a runbook to execute *after* plan approval. Nothing destructi
 | Void rootfs | `~/Downloads/void-x86_64-ROOTFS-20250202.tar.xz` (**glibc**) |
 | Hostname (all 3) | `apestonks-69` |
 | User (all 3) | **`admin`**, UID/GID **1000** (must match — shared `/home`) |
+| Locale / TZ / keymap | `en_US.UTF-8` · **`America/New_York`** · `us` (read from your arch install, NOT the live env's UTC) |
 | Swap | **single shared swapfile on the array** (`/mnt/hot/swapfile`, `pri=10`, `nofail`) — per your arch fstab |
 | Login | **plain TTY getty → manual launch** (no DM, no graphical boot) |
 | WM | niri (Void, NixOS) · **ctwm on Xorg** (Debian only) |
@@ -103,7 +104,7 @@ Inside chroot:
 - `apt install`: `linux-image-amd64 linux-headers-amd64 grub-efi-amd64 os-prober mdadm f2fs-tools sudo locales console-setup` + **net** (`systemd-resolved` + `systemd-networkd` or `network-manager`).
 - Dev/common: `git curl wget jq neovim nodejs npm build-essential dkms`.
 - **Xorg + ctwm (NO niri):** `xserver-xorg xinit ctwm`.
-- Identity: hostname `apestonks-69`, `en_US.UTF-8`, tz, `passwd` root, `useradd -m -u 1000 -U -G sudo,video,render admin` (home already on shared md0 — see Phase 4).
+- Identity: hostname `apestonks-69`, locale `en_US.UTF-8`, **tz `America/New_York`**, keymap `us`, `passwd` root, `useradd -m -u 1000 -U -G sudo,video,render admin` (home already on shared md0 — see Phase 4).
 - Bootloader (master): see **Phase 4 §Bootloader**.
 - **GPU: nouveau only.** Debian is the light master — NO nvidia/CUDA/ec-jt/docker here. nouveau is
   in-kernel, nothing to install. (iGPU on default **i915** — no params, §iGPU.) `firmware-misc-nonfree` for misc fw.
@@ -147,7 +148,7 @@ nixos-install --root /mnt/nix
 networking.hostName = "apestonks-69";
 system.stateVersion = "26.05";   # schema anchor only — packages track nixos-unstable, not this
 boot.kernelPackages = pkgs.linuxPackages_latest;   # newest kernel: Xe (RPL) + Blackwell
-time.timeZone = "UTC"; i18n.defaultLocale = "en_US.UTF-8";
+time.timeZone = "America/New_York"; i18n.defaultLocale = "en_US.UTF-8"; console.keyMap = "us";
 users.users.admin = { isNormalUser = true; uid = 1000;
   extraGroups = [ "wheel" "video" "render" "docker" ]; };
 
