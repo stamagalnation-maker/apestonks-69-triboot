@@ -209,6 +209,30 @@ swapDevices = [ { device = "/mnt/hot/swapfile"; } ];  # shared file on the array
   to the **local `/home/admin`** on the rootfs; boot/login unaffected. So each rootfs must already
   contain `/home/admin` (guaranteed by `useradd -m admin` / NixOS `isNormalUser`).
 
+### §`/var/lib` offload — bind the heavy `/var/lib/*` onto the array (so you don't redo it per install)
+The space-eaters live under `/var/lib`; bind each onto `/mnt/hot` so they never fill the small USB roots
+**and persist across reinstalls**. Same `nofail` bind pattern as `/home`. Make the targets first:
+`mkdir -p /mnt/hot/var/{docker,containers,machines,libvirt,ollama}`.
+
+Debian/Void fstab (add only the ones that OS actually runs):
+```
+/mnt/hot/var/docker      /var/lib/docker      none  bind,nofail  0 0   # docker images/overlay
+/mnt/hot/var/containers  /var/lib/containers  none  bind,nofail  0 0   # podman
+/mnt/hot/var/machines    /var/lib/machines    none  bind,nofail  0 0   # systemd-nspawn
+/mnt/hot/var/libvirt     /var/lib/libvirt     none  bind,nofail  0 0   # kvm/qemu VM images
+/mnt/hot/var/ollama      /var/lib/ollama      none  bind,nofail  0 0   # ollama models (huge)
+```
+
+NixOS equivalent (no fstab — declare in `configuration.nix`, since this isn't your dept):
+```nix
+fileSystems."/var/lib/docker"  = { device = "/mnt/hot/var/docker";  fsType = "none"; options = [ "bind" "nofail" ]; };
+fileSystems."/var/lib/libvirt" = { device = "/mnt/hot/var/libvirt"; fsType = "none"; options = [ "bind" "nofail" ]; };
+fileSystems."/var/lib/ollama"  = { device = "/mnt/hot/var/ollama";  fsType = "none"; options = [ "bind" "nofail" ]; };
+# add /var/lib/{containers,machines} the same way if used
+```
+`nofail` everywhere → dead array just falls back to the local (empty) dir, never blocks boot. (Whole-`/var`
+on the array stays deferred/optional per your call — this is only the `/var/lib` heavyweights.)
+
 ### §Swap — single shared swapfile on the array (matches your arch fstab)
 - One swapfile on `/mnt/hot` (your convention), referenced by all three. Safe because only one distro
   boots at a time off USB; and Debian's 16G root can't host a swapfile anyway.
