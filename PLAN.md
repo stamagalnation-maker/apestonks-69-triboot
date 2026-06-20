@@ -73,15 +73,11 @@ nix-channel --add https://nixos.org/channels/nixos-25.05 nixpkgs && nix-channel 
 nix-env -iA nixpkgs.nixos-install-tools
 ```
 
-**Rename/clamp the array to `/dev/md0` now** (kernel calls it `md127` only because this live host is a
-foreign homehost — it is **md0**) so `/home` is reachable during each chroot under the right node:
-```bash
-mdadm --stop /dev/md127 2>/dev/null
-mdadm --assemble /dev/md0 --uuid=85172657:de2fb0b4:a9f5a913:98c95b5c   # force node → md0
-# metadata name is already 'apestonks-69:0'; re-stamp only if ever needed:
-#   mdadm --assemble /dev/md0 --update=name --name=apestonks-69:0 --uuid=85172657:...
-cat /proc/mdstat   # confirm: md0, NOT md127
-```
+**Do NOT restack/clamp the array from the live env.** No `mdadm --stop/--assemble/--create` here.
+The array is **preserved and never formatted** — it holds `/home`. The `md0` name is achieved *only*
+by the `mdadm.conf` written into each installed OS (§RAID). For bootstrap, mount the
+**already-assembled** array read-write as-is (whatever node the live kernel assigned, e.g.
+`/dev/md127`); the installed systems will present it as `/dev/md0` via their own `mdadm.conf`.
 
 ---
 
