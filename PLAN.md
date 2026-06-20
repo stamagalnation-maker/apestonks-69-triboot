@@ -224,12 +224,17 @@ Debian/Void fstab (add only the ones that OS actually runs):
 /mnt/hot/var/ollama      /var/lib/ollama      none  bind,nofail  0 0   # ollama models (huge)
 ```
 
-NixOS equivalent (no fstab — declare in `configuration.nix`, since this isn't your dept):
+NixOS — **the idiomatic way is to set each service's OWN storage option**, NOT bind-mount over
+`/var/lib`. Bind is the escape hatch *only* where a module exposes no path option:
 ```nix
-fileSystems."/var/lib/docker"  = { device = "/mnt/hot/var/docker";  fsType = "none"; options = [ "bind" "nofail" ]; };
-fileSystems."/var/lib/libvirt" = { device = "/mnt/hot/var/libvirt"; fsType = "none"; options = [ "bind" "nofail" ]; };
-fileSystems."/var/lib/ollama"  = { device = "/mnt/hot/var/ollama";  fsType = "none"; options = [ "bind" "nofail" ]; };
-# add /var/lib/{containers,machines} the same way if used
+# proper module options (verified against nixpkgs docs):
+virtualisation.docker.daemon.settings.data-root = "/mnt/hot/var/docker";   # docker storage
+services.ollama.models = "/mnt/hot/var/ollama/models";                     # ollama models dir
+# services.ollama.loadModels = [ "gemma:..." ];  # optional: declaratively pull on boot
+
+# escape-hatch bind ONLY for things with no path option (libvirt, systemd-nspawn machines):
+fileSystems."/var/lib/libvirt"  = { device = "/mnt/hot/var/libvirt";  fsType = "none"; options = [ "bind" "nofail" ]; };
+fileSystems."/var/lib/machines" = { device = "/mnt/hot/var/machines"; fsType = "none"; options = [ "bind" "nofail" ]; };
 ```
 `nofail` everywhere → dead array just falls back to the local (empty) dir, never blocks boot. (Whole-`/var`
 on the array stays deferred/optional per your call — this is only the `/var/lib` heavyweights.)
